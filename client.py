@@ -127,19 +127,25 @@ class CloneThread(QThread):
         try:
             repo_name = self.url.split('/')[-1].replace(".git", "")
             project_path = os.path.join(self.projects_dir, repo_name)
+            if os.path.exists(project_path):
+                raise Exception(f"Проект {repo_name} уже существует.")
+
             self.message.emit(f"Скачивание проекта {repo_name}...")
             git.Repo.clone_from(self.url, project_path)
 
             self.progress.emit(35)
             self.message.emit("Создание виртуального окружения...")
-            subprocess.check_call([sys.executable, '-m', 'venv', self.get_venv(project_path)])
+            venv_created = subprocess.run([sys.executable, '-m', 'venv', self.get_venv(project_path)], check=True)
 
             self.progress.emit(60)
             requirements_path = os.path.join(project_path, 'requirements.txt')
             if os.path.exists(requirements_path):
                 self.message.emit("Установка зависимостей...")
-                subprocess.check_call(
-                    [os.path.join(self.get_venv(project_path), 'Scripts', 'pip'), 'install', '-r', requirements_path])
+                dependencies_installed = subprocess.run(
+                    [os.path.join(self.get_venv(project_path), 'Scripts', 'pip'), 'install', '-r', requirements_path],
+                    check=True)
+                if dependencies_installed.returncode != 0:
+                    raise Exception("Ошибка при установке зависимостей")
 
             self.progress.emit(100)
         except Exception as e:
@@ -173,8 +179,10 @@ class UpdateThread(QThread):
             requirements_path = os.path.join(self.project_path, 'requirements.txt')
             if os.path.exists(requirements_path):
                 self.message.emit("Обновление зависимостей...")
-                subprocess.check_call(
-                    [os.path.join(self.get_venv(self.project_path), 'Scripts', 'pip'), 'install', '-r', requirements_path])
+                subprocess.run(
+                    [os.path.join(self.get_venv(self.project_path), 'Scripts', 'pip'), 'install', '-r',
+                     requirements_path],
+                    check=True)
 
             self.progress.emit(100)
         except Exception as e:
@@ -225,8 +233,9 @@ class GitHubManager(QMainWindow):
 
             requirements_path = os.path.join(project_path, 'requirements.txt')
             if os.path.exists(requirements_path):
-                subprocess.check_call(
-                    [os.path.join(self.get_venv(project_path), 'Scripts', 'pip'), 'install', '-r', requirements_path])
+                subprocess.run(
+                    [os.path.join(self.get_venv(project_path), 'Scripts', 'pip'), 'install', '-r', requirements_path],
+                    check=True)
         except Exception as e:
             print(f"Ошибка при обновлении проекта {project_path}: {e}")
 
@@ -305,17 +314,18 @@ class GitHubManager(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Введите ссылку на GitHub")
             return
 
+        if hasattr(self, 'clone_thread') and self.clone_thread.isRunning():
+            QMessageBox.warning(self, "Ошибка", "Клонирование уже запущено")
+            return
+
         self.show_progress("Начало клонирования...")
 
         self.clone_thread = CloneThread(url, self.projects_dir)
         self.clone_thread.progress.connect(self.progress_bar.setValue)
         self.clone_thread.message.connect(self.status_label.setText)
         self.clone_thread.finished.connect(self.on_clone_finished)
+        self.clone_thread.finished.connect(lambda: self.clone_thread.deleteLater())
         self.clone_thread.start()
-
-    def on_clone_finished(self):
-        self.load_projects()
-        self.hide_progress()
 
     def update_project(self):
         selected_item = self.projects_list.currentItem()
@@ -323,33 +333,23 @@ class GitHubManager(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Выберите проект для обновления")
             return
 
+        if hasattr(self, 'update_thread') and self.update_thread.isRunning():
+            QMessageBox.warning(self, "Ошибка", "Обновление уже запущено")
+            return
+
         project_path = os.path.join(self.projects_dir, selected_item.text())
         self.show_progress("Начало обновления...", 0)
 
-        try:
-            repo = git.Repo(project_path)
-            if repo.is_dirty():
-                reply = QMessageBox.question(self, "Несохраненные изменения",
-                                             "Есть несохраненные изменения. Сохранить изменения перед обновлением?",
-                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-                if reply == QMessageBox.Yes:
-                    repo.git.add(A=True)
-                    repo.index.commit("Сохранение незакоммиченных изменений перед обновлением")
+        self.update_thread = UpdateThread(project_path)
+        self.update_thread.progress.connect(self.progress_bar.setValue)
+        self.update_thread.message.connect(self.status_label.setText)
+        self.update_thread.finished.connect(self.on_update_finished)
+        self.update_thread.finished.connect(lambda: self.update_thread.deleteLater())
+        self.update_thread.start()
 
-            origin = repo.remotes.origin
-            origin.pull()
-
-            requirements_path = os.path.join(project_path, 'requirements.txt')
-            if os.path.exists(requirements_path):
-                subprocess.check_call(
-                    [os.path.join(self.get_venv(project_path), 'Scripts', 'pip'), 'install', '-r', requirements_path])
-
-            self.status_label.setText("Обновление завершено.")
-            QTimer.singleShot(2000, self.hide_progress)
-
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Ошибка при обновлении проекта: {e}")
-            self.hide_progress()
+    def on_clone_finished(self):
+        self.load_projects()
+        self.hide_progress()
 
     def on_update_finished(self):
         # После завершения обновления переключаемся на последний коммит
@@ -405,17 +405,30 @@ class GitHubManager(QMainWindow):
 
         self.show_progress(f"Запуск {project_name}...", 0)
 
+        if project_name in self.output_windows:
+            output_window = self.output_windows[project_name]
+            if output_window.isVisible():
+                QMessageBox.warning(self, "Ошибка", "Проект уже запущен")
+                self.hide_progress()
+                return
+            else:
+                output_window.close()
+                output_window.deleteLater()
+
         process = QProcess(self)
         process.setProgram(python_executable)
         process.setArguments([run_file])
         process.setWorkingDirectory(project_path)
 
-        self.output_windows[project_name] = OutputWindow(project_name, process)
-        self.output_windows[project_name].show()
+        output_window = OutputWindow(project_name, process)
+        self.output_windows[project_name] = output_window
+        output_window.show()
 
-        process.readyReadStandardOutput.connect(lambda: self.output_windows[project_name].append_output(str(process.readAllStandardOutput(), 'utf-8')))
-        process.readyReadStandardError.connect(lambda: self.output_windows[project_name].append_output(str(process.readAllStandardError(), 'utf-8')))
-        process.finished.connect(lambda: self.output_windows[project_name].set_status("Скрипт завершил работу"))
+        process.readyReadStandardOutput.connect(
+            lambda: output_window.append_output(str(process.readAllStandardOutput(), 'utf-8')))
+        process.readyReadStandardError.connect(
+            lambda: output_window.append_output(str(process.readAllStandardError(), 'utf-8')))
+        process.finished.connect(lambda: output_window.set_status("Скрипт завершил работу"))
 
         process.start()
         self.hide_progress()
@@ -459,10 +472,13 @@ class GitHubManager(QMainWindow):
                 shutil.rmtree(venv_path)
 
             # Создание нового виртуального окружения и установка зависимостей
-            subprocess.check_call([sys.executable, '-m', 'venv', venv_path])
+            subprocess.run(
+                [sys.executable, '-m', 'venv', venv_path],
+                check=True)
             requirements_path = os.path.join(project_path, 'requirements.txt')
             if os.path.exists(requirements_path):
-                subprocess.check_call([os.path.join(venv_path, 'Scripts', 'pip'), 'install', '-r', requirements_path])
+                subprocess.run([os.path.join(venv_path, 'Scripts', 'pip'), 'install', '-r', requirements_path],
+                               check=True)
 
             # Обновление видимости коммитов после переключения
             self.update_commits()
@@ -511,8 +527,12 @@ class GitHubManager(QMainWindow):
         return os.path.join(project_path, '.venv')
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+
     app = QApplication(sys.argv)
-    app.setAttribute(Qt.AA_DisableWindowContextHelpButton, False)
-    ex = GitHubManager()
+    window = GitHubManager()
+    window.show()
     sys.exit(app.exec_())
