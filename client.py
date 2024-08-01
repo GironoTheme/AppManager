@@ -97,12 +97,11 @@ class SettingsWindow(QWidget):
         for project in os.listdir(self.parent.projects_dir):
             config_path = os.path.join(self.parent.projects_dir, project, 'config.json')
             if os.path.exists(config_path):
-                with open(config_path, 'r+', encoding='utf-8') as f:
+                with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    config['run_file'] = None
-                    f.seek(0)
+                config['run_file'] = None
+                with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump(config, f, ensure_ascii=False, indent=4)
-                    f.truncate()
         QMessageBox.information(self, "Сброс путей", "Пути файлов запуска сброшены")
 
     def save_settings(self):
@@ -394,9 +393,16 @@ class GitHubManager(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", "Файл запуска не выбран")
                 return
 
-            config['run_file'] = run_file
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=4)
+            if os.path.exists(config_path):
+                with open(config_path, 'r+', encoding='utf-8') as f:
+                    config = json.load(f)
+                    config['run_file'] = run_file
+                    f.seek(0)
+                    json.dump(config, f, ensure_ascii=False, indent=4)
+                    f.truncate()
+            else:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump({'run_file': run_file}, f, ensure_ascii=False, indent=4)
 
         python_executable = os.path.join(self.get_venv(project_path), 'Scripts', 'python.exe')
 
