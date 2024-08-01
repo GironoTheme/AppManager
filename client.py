@@ -97,7 +97,12 @@ class SettingsWindow(QWidget):
         for project in os.listdir(self.parent.projects_dir):
             config_path = os.path.join(self.parent.projects_dir, project, 'config.json')
             if os.path.exists(config_path):
-                os.remove(config_path)
+                with open(config_path, 'r+', encoding='utf-8') as f:
+                    config = json.load(f)
+                    config['run_file'] = None
+                    f.seek(0)
+                    json.dump(config, f, ensure_ascii=False, indent=4)
+                    f.truncate()
         QMessageBox.information(self, "Сброс путей", "Пути файлов запуска сброшены")
 
     def save_settings(self):
@@ -376,12 +381,11 @@ class GitHubManager(QMainWindow):
         project_path = os.path.join(self.projects_dir, project_name)
         config_path = os.path.join(project_path, 'config.json')
 
+        run_file = None
         if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
+            with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             run_file = config.get('run_file')
-        else:
-            run_file = None
 
         if not run_file:
             run_file, _ = QFileDialog.getOpenFileName(self, "Выберите файл для запуска", project_path,
@@ -390,8 +394,9 @@ class GitHubManager(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", "Файл запуска не выбран")
                 return
 
-            with open(config_path, 'w') as f:
-                json.dump({'run_file': run_file}, f)
+            config['run_file'] = run_file
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
 
         python_executable = os.path.join(self.get_venv(project_path), 'Scripts', 'python.exe')
 
@@ -528,9 +533,6 @@ class GitHubManager(QMainWindow):
 
 
 if __name__ == "__main__":
-    import multiprocessing
-
-    multiprocessing.freeze_support()
 
     app = QApplication(sys.argv)
     window = GitHubManager()
