@@ -1,15 +1,70 @@
-import shutil
-import sys
+import asyncio
 import os
+import sys
 import json
+import shutil
 import subprocess
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel, QListWidget, \
-    QMessageBox, QFileDialog, QMenuBar, QAction, QMainWindow, QTextEdit, QProgressBar, QComboBox, QInputDialog
-from PyQt5.QtCore import Qt, QProcess, QFileSystemWatcher, QThread, pyqtSignal, QTimer
+import threading
 import git
+from tkinter import Tk, Frame, Label, Entry, Button, Listbox, Menu, filedialog, messagebox, simpledialog, Scrollbar, Text, Toplevel, END, BOTH, W, N, E, S, HORIZONTAL, X, OptionMenu, StringVar
+from tkinter.ttk import Progressbar, Style, Treeview
+
+from pynput import keyboard
 
 SETTINGS_FILE = 'settings.json'
 
+
+def get_python_executable():
+    if hasattr(sys, 'frozen'):
+        with open(os.path.join(sys._MEIPASS, 'python_path.txt'), 'r') as f:
+            return f.read().strip()
+    else:
+        return sys.executable
+
+
+async def create_venv(project_path):
+    venv_path = os.path.join(project_path, 'venv')
+    python_executable = get_python_executable()  # Используем сохраненный путь к Python
+    venv_create_command = [python_executable, '-m', 'venv', venv_path]
+
+    # Проверяем, что python_executable существует
+    if not os.path.exists(python_executable):
+        raise Exception(f"Python executable not found: {python_executable}")
+
+    print(f"Creating virtual environment with: {venv_create_command}")
+
+    # Создание виртуального окружения
+    proc = await asyncio.create_subprocess_exec(
+        *venv_create_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        raise Exception(f"Error creating virtual environment: {stderr.decode()}")
+
+    requirements_path = os.path.join(project_path, 'requirements.txt')
+    if os.path.exists(requirements_path):
+        pip_executable = os.path.join(venv_path, 'Scripts', 'pip')
+        install_command = [pip_executable, 'install', '-r', requirements_path]
+
+        # Проверяем, что pip_executable существует
+        if not os.path.exists(pip_executable):
+            raise Exception(f"Pip executable not found: {pip_executable}")
+
+        print(f"Installing dependencies with: {install_command}")
+
+        # Установка зависимостей
+        proc = await asyncio.create_subprocess_exec(
+            *install_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            raise Exception(f"Error installing dependencies: {stderr.decode()}")
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
@@ -23,175 +78,153 @@ def save_settings(settings):
         json.dump(settings, f)
 
 
-class OutputWindow(QWidget):
+class OutputWindow(Toplevel):
     def __init__(self, project_name, process):
         super().__init__()
-        self.setWindowTitle(f"{project_name}")
-        self.layout = QVBoxLayout()
+        self.title(f"{project_name}")
         self.process = process
 
-        self.output_text = QTextEdit(self)
-        self.output_text.setReadOnly(True)
-        self.layout.addWidget(self.output_text)
+        self.output_text = Text(self, state='disabled')
+        self.output_text.pack(expand=True, fill=BOTH)
 
-        self.status_label = QLabel("Проект запущен...", self)
-        self.layout.addWidget(self.status_label)
+        self.status_label = Label(self, text="Проект запущен...")
+        self.status_label.pack()
 
-        self.setLayout(self.layout)
+        self.stop_button = Button(self, text="Остановить", command=self.stop_process)
+        self.stop_button.pack()
 
     def append_output(self, text):
-        self.output_text.append(text)
+        self.output_text.config(state='normal')
+        self.output_text.insert(END, text)
+        self.output_text.config(state='disabled')
 
     def set_status(self, status):
-        self.status_label.setText(status)
+        self.status_label.config(text=status)
 
-    def closeEvent(self, event):
-        if self.process and self.process.state() == QProcess.Running:
+    def stop_process(self):
+        if self.process and self.process.poll() is None:
             self.process.terminate()
-            self.process.waitForFinished(3000)
-            if self.process.state() == QProcess.Running:
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
                 self.process.kill()
-        event.accept()
+            self.set_status("Проект остановлен")
+            self.stop_button.config(state='disabled')
+
+    def close(self):
+        self.stop_process()
+        self.destroy()
 
 
-class SettingsWindow(QWidget):
+class SettingsWindow(Toplevel):
     def __init__(self, parent):
-        super(SettingsWindow, self).__init__()
+        super().__init__(parent)
         self.parent = parent
         self.initUI()
 
     def initUI(self):
-        layout = QVBoxLayout()
+        self.title("Настройки")
+        self.geometry("400x200")
 
-        self.path_label = QLabel("Путь папки проектов:", self)
-        layout.addWidget(self.path_label)
+        style = Style(self)
+        style.configure("TLabel", font=("Segoe UI", 12))
+        style.configure("TButton", font=("Segoe UI", 12))
 
-        self.path_input = QLineEdit(self)
-        self.path_input.setText(self.parent.projects_dir)
-        layout.addWidget(self.path_input)
+        path_label = Label(self, text="Путь папки проектов:")
+        path_label.pack(pady=10)
 
-        self.path_browse_button = QPushButton("Обзор...", self)
-        self.path_browse_button.clicked.connect(self.browse_folder)
-        layout.addWidget(self.path_browse_button)
+        self.path_input = Entry(self)
+        self.path_input.insert(0, self.parent.projects_dir)
+        self.path_input.pack(padx=10, pady=5)
 
-        self.run_files_label = QLabel("Сбросить пути файлов запуска:", self)
-        layout.addWidget(self.run_files_label)
+        self.path_browse_button = Button(self, text="Обзор...", command=self.browse_folder)
+        self.path_browse_button.pack(pady=5)
 
-        self.run_files_reset_button = QPushButton("Сбросить", self)
-        self.run_files_reset_button.clicked.connect(self.reset_run_paths)
-        layout.addWidget(self.run_files_reset_button)
-
-        self.save_button = QPushButton("Сохранить", self)
-        self.save_button.clicked.connect(self.save_settings)
-        layout.addWidget(self.save_button)
-
-        self.setLayout(layout)
-        self.setWindowTitle('Настройки')
+        self.save_button = Button(self, text="Сохранить", command=self.save_settings)
+        self.save_button.pack(pady=10)
 
     def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Выберите папку проектов", self.parent.projects_dir)
+        folder = filedialog.askdirectory(initialdir=self.parent.projects_dir, title="Выберите папку проектов")
         if folder:
-            self.path_input.setText(folder)
-
-    def reset_run_paths(self):
-        for project in os.listdir(self.parent.projects_dir):
-            config_path = os.path.join(self.parent.projects_dir, project, 'config.json')
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                config['run_file'] = None
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(config, f, ensure_ascii=False, indent=4)
-        QMessageBox.information(self, "Сброс путей", "Пути файлов запуска сброшены")
+            self.path_input.delete(0, END)
+            self.path_input.insert(0, folder)
 
     def save_settings(self):
-        new_path = self.path_input.text()
+        new_path = self.path_input.get()
         if new_path and new_path != self.parent.projects_dir:
             self.parent.projects_dir = new_path
             os.makedirs(self.parent.projects_dir, exist_ok=True)
             self.parent.load_projects()
-            self.parent.file_watcher.addPath(new_path)
-            settings = load_settings()
+            settings = self.parent.load_settings()
             settings['projects_dir'] = new_path
-            save_settings(settings)
-        self.close()
+            self.parent.save_settings(settings)
+        self.destroy()
+
+    def close(self):
+        self.destroy()
 
 
-class CloneThread(QThread):
-    progress = pyqtSignal(int)
-    message = pyqtSignal(str)
-    finished = pyqtSignal()
-
-    def __init__(self, url, projects_dir):
+class CloneThread(threading.Thread):
+    def __init__(self, url, projects_dir, progress_callback, message_callback, finished_callback):
         super().__init__()
         self.url = url
         self.projects_dir = projects_dir
+        self.progress_callback = progress_callback
+        self.message_callback = message_callback
+        self.finished_callback = finished_callback
 
     def run(self):
+        asyncio.run(self.clone_project())
+
+    async def clone_project(self):
         try:
             repo_name = self.url.split('/')[-1].replace(".git", "")
             project_path = os.path.join(self.projects_dir, repo_name)
             if os.path.exists(project_path):
                 raise Exception(f"Проект {repo_name} уже существует.")
 
-            self.message.emit(f"Скачивание проекта {repo_name}...")
+            self.message_callback(f"Скачивание проекта {repo_name}...")
             git.Repo.clone_from(self.url, project_path)
 
-            self.progress.emit(35)
-            self.message.emit("Создание виртуального окружения...")
-            venv_created = subprocess.run([sys.executable, '-m', 'venv', self.get_venv(project_path)], check=True)
+            self.progress_callback(35)
+            self.message_callback("Создание виртуального окружения...")
 
-            self.progress.emit(60)
-            requirements_path = os.path.join(project_path, 'requirements.txt')
-            if os.path.exists(requirements_path):
-                self.message.emit("Установка зависимостей...")
-                dependencies_installed = subprocess.run(
-                    [os.path.join(self.get_venv(project_path), 'Scripts', 'pip'), 'install', '-r', requirements_path],
-                    check=True)
-                if dependencies_installed.returncode != 0:
-                    raise Exception("Ошибка при установке зависимостей")
+            await create_venv(project_path)
 
-            self.progress.emit(100)
+            self.progress_callback(100)
         except Exception as e:
-            self.message.emit(str(e))
-        self.finished.emit()
-
-    def get_venv(self, project_path):
-        venv_path = os.path.join(project_path, 'venv')
-        if os.path.exists(venv_path):
-            return venv_path
-        return os.path.join(project_path, '.venv')
+            self.message_callback(str(e))
+        self.finished_callback()
 
 
-class UpdateThread(QThread):
-    progress = pyqtSignal(int)
-    message = pyqtSignal(str)
-    finished = pyqtSignal()
-
-    def __init__(self, project_path):
+class UpdateThread(threading.Thread):
+    def __init__(self, project_path, progress_callback, message_callback, finished_callback):
         super().__init__()
         self.project_path = project_path
+        self.progress_callback = progress_callback
+        self.message_callback = message_callback
+        self.finished_callback = finished_callback
 
     def run(self):
         try:
-            self.message.emit("Обновление проекта...")
+            self.message_callback("Обновление проекта...")
             repo = git.Repo(self.project_path)
             origin = repo.remotes.origin
             origin.pull()
 
-            self.progress.emit(50)
+            self.progress_callback(50)
             requirements_path = os.path.join(self.project_path, 'requirements.txt')
             if os.path.exists(requirements_path):
-                self.message.emit("Обновление зависимостей...")
+                self.message_callback("Обновление зависимостей...")
                 subprocess.run(
                     [os.path.join(self.get_venv(self.project_path), 'Scripts', 'pip'), 'install', '-r',
                      requirements_path],
                     check=True)
 
-            self.progress.emit(100)
+            self.progress_callback(100)
         except Exception as e:
-            self.message.emit(str(e))
-        self.finished.emit()
+            self.message_callback(str(e))
+        self.finished_callback()
 
     def get_venv(self, project_path):
         venv_path = os.path.join(project_path, 'venv')
@@ -200,7 +233,7 @@ class UpdateThread(QThread):
         return os.path.join(project_path, '.venv')
 
 
-class GitHubManager(QMainWindow):
+class GitHubManager(Tk):
     def __init__(self):
         super().__init__()
 
@@ -208,339 +241,309 @@ class GitHubManager(QMainWindow):
         self.projects_dir = self.settings['projects_dir']
         os.makedirs(self.projects_dir, exist_ok=True)
         self.output_windows = {}
-
-        self.file_watcher = QFileSystemWatcher()
-        self.file_watcher.addPath(self.projects_dir)
-        self.file_watcher.directoryChanged.connect(self.load_projects)
+        self.selected_commit = StringVar()
 
         self.initUI()
         self.autoupdate_projects()
 
-    def autoupdate_projects(self):
-        self.show_progress("Автообновление проектов...", 0)
-        total_projects = len(os.listdir(self.projects_dir))
-        progress_step = 100 // total_projects if total_projects else 100
+        self.minsize(800, 600)
 
-        for idx, project in enumerate(os.listdir(self.projects_dir)):
-            project_path = os.path.join(self.projects_dir, project)
-            self.update_single_project(project_path)
-            self.progress_bar.setValue((idx + 1) * progress_step)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)  # Обработчик закрытия окна
 
-        self.status_label.setText("Автообновление завершено.")
-        QTimer.singleShot(2000, self.hide_progress)
+        self.listener = keyboard.GlobalHotKeys({
+            '<ctrl>+<alt>+q': self.stop_last_project
+        })
+        self.listener.start()
 
-    def update_single_project(self, project_path):
-        try:
-            repo = git.Repo(project_path)
-            origin = repo.remotes.origin
-            origin.pull()
+    def stop_last_project(self):
+        print("Hotkey triggered: Ctrl+Alt+Q")  # Проверка, вызывается ли функция
+        if self.output_windows:
+            last_project = list(self.output_windows.keys())[-1]
+            print(f"Stopping project: {last_project}")  # Проверка, что проект выбирается
+            self.output_windows[last_project].stop_process()
+        else:
+            print("No projects running")
 
-            requirements_path = os.path.join(project_path, 'requirements.txt')
-            if os.path.exists(requirements_path):
-                subprocess.run(
-                    [os.path.join(self.get_venv(project_path), 'Scripts', 'pip'), 'install', '-r', requirements_path],
-                    check=True)
-        except Exception as e:
-            print(f"Ошибка при обновлении проекта {project_path}: {e}")
+    def on_close(self):
+        for output_window in self.output_windows.values():
+            output_window.stop_process()
+        self.destroy()
 
-    def initUI(self):
-        main_widget = QWidget()
-        main_layout = QVBoxLayout()
-
-        menu_bar = self.menuBar()
-
-        self.settings_action = QAction("Настройки", self)
-        self.settings_action.triggered.connect(self.open_settings)
-        menu_bar.addAction(self.settings_action)
-
-        self.url_input = QLineEdit(self)
-        self.url_input.setPlaceholderText("Введите ссылку на GitHub")
-        main_layout.addWidget(self.url_input)
-
-        self.clone_button = QPushButton("Клонировать проект", self)
-        self.clone_button.clicked.connect(self.clone_project)
-        main_layout.addWidget(self.clone_button)
-
-        self.update_button = QPushButton("Обновить проект", self)
-        self.update_button.clicked.connect(self.update_project)
-        main_layout.addWidget(self.update_button)
-
-        self.run_button = QPushButton("Запустить проект", self)
-        self.run_button.clicked.connect(self.run_project)
-        main_layout.addWidget(self.run_button)
-
-        self.switch_commit_button = QPushButton("Переключить коммит", self)
-        self.switch_commit_button.clicked.connect(self.switch_commit)
-        main_layout.addWidget(self.switch_commit_button)
-
-        self.commit_selector = QComboBox(self)
-        self.commit_selector.setVisible(False)
-        main_layout.addWidget(self.commit_selector)
-
-        self.projects_list = QListWidget(self)
-        self.projects_list.currentItemChanged.connect(self.update_commits)
-        self.load_projects()
-        main_layout.addWidget(self.projects_list)
-
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setVisible(False)
-        main_layout.addWidget(self.progress_bar)
-
-        self.status_label = QLabel("", self)
-        self.status_label.setVisible(False)
-        main_layout.addWidget(self.status_label)
-
-        main_widget.setLayout(main_layout)
-        self.setCentralWidget(main_widget)
-        self.setWindowTitle('Scripts Manager')
-
-        self.show()
-
-    def load_projects(self):
-        self.projects_list.clear()
-        for project in os.listdir(self.projects_dir):
-            self.projects_list.addItem(project)
-        self.update_commits()
-
-    def show_progress(self, message, value=0):
-        self.progress_bar.setValue(value)
-        self.progress_bar.setVisible(True)
-        self.status_label.setText(message)
-        self.status_label.setVisible(True)
-
-    def hide_progress(self):
-        self.progress_bar.setVisible(False)
-        self.status_label.setVisible(False)
-
-    def clone_project(self):
-        url = self.url_input.text().strip()
-        if not url:
-            QMessageBox.warning(self, "Ошибка", "Введите ссылку на GitHub")
-            return
-
-        if hasattr(self, 'clone_thread') and self.clone_thread.isRunning():
-            QMessageBox.warning(self, "Ошибка", "Клонирование уже запущено")
-            return
-
-        self.show_progress("Начало клонирования...")
-
-        self.clone_thread = CloneThread(url, self.projects_dir)
-        self.clone_thread.progress.connect(self.progress_bar.setValue)
-        self.clone_thread.message.connect(self.status_label.setText)
-        self.clone_thread.finished.connect(self.on_clone_finished)
-        self.clone_thread.finished.connect(lambda: self.clone_thread.deleteLater())
-        self.clone_thread.start()
-
-    def update_project(self):
-        selected_item = self.projects_list.currentItem()
+    def switch_commit(self, project_path):
+        selected_item = self.commit_tree.selection()
         if not selected_item:
-            QMessageBox.warning(self, "Ошибка", "Выберите проект для обновления")
+            messagebox.showwarning("Ошибка", "Пожалуйста, выберите коммит для переключения.")
             return
 
-        if hasattr(self, 'update_thread') and self.update_thread.isRunning():
-            QMessageBox.warning(self, "Ошибка", "Обновление уже запущено")
-            return
-
-        project_path = os.path.join(self.projects_dir, selected_item.text())
-        self.show_progress("Начало обновления...", 0)
-
-        self.update_thread = UpdateThread(project_path)
-        self.update_thread.progress.connect(self.progress_bar.setValue)
-        self.update_thread.message.connect(self.status_label.setText)
-        self.update_thread.finished.connect(self.on_update_finished)
-        self.update_thread.finished.connect(lambda: self.update_thread.deleteLater())
-        self.update_thread.start()
-
-    def on_clone_finished(self):
-        self.load_projects()
-        self.hide_progress()
-
-    def on_update_finished(self):
-        # После завершения обновления переключаемся на последний коммит
-        selected_item = self.projects_list.currentItem()
-        if selected_item:
-            project_path = os.path.join(self.projects_dir, selected_item.text())
-            try:
-                repo = git.Repo(project_path)
-                latest_commit = repo.heads.master.commit.hexsha  # Предполагается, что главная ветка называется master
-                repo.git.checkout(latest_commit)
-            except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Ошибка при переключении на последний коммит: {e}")
-
-        self.status_label.setText("Обновление завершено.")
-        QTimer.singleShot(2000, self.hide_progress)
-
-    def run_project(self):
-        selected_item = self.projects_list.currentItem()
-        if not selected_item:
-            QMessageBox.warning(self, "Ошибка", "Выберите проект для запуска")
-            return
-
-        project_name = selected_item.text()
-        project_path = os.path.join(self.projects_dir, project_name)
-        config_path = os.path.join(project_path, 'config.json')
-
-        run_file = None
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            run_file = config.get('run_file')
-
-        if not run_file:
-            run_file, _ = QFileDialog.getOpenFileName(self, "Выберите файл для запуска", project_path,
-                                                      "Python Files (*.py);;All Files (*)")
-            if not run_file:
-                QMessageBox.warning(self, "Ошибка", "Файл запуска не выбран")
-                return
-
-            if os.path.exists(config_path):
-                with open(config_path, 'r+', encoding='utf-8') as f:
-                    config = json.load(f)
-                    config['run_file'] = run_file
-                    f.seek(0)
-                    json.dump(config, f, ensure_ascii=False, indent=4)
-                    f.truncate()
-            else:
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump({'run_file': run_file}, f, ensure_ascii=False, indent=4)
-
-        python_executable = os.path.join(self.get_venv(project_path), 'Scripts', 'python.exe')
-
-        if not os.path.exists(python_executable):
-            QMessageBox.critical(self, "Ошибка", f"Не найден интерпретатор Python: {python_executable}")
-            return
-
-        if not os.path.exists(run_file):
-            QMessageBox.critical(self, "Ошибка", f"Не найден файл запуска: {run_file}")
-            return
-
-        self.show_progress(f"Запуск {project_name}...", 0)
-
-        if project_name in self.output_windows:
-            output_window = self.output_windows[project_name]
-            if output_window.isVisible():
-                QMessageBox.warning(self, "Ошибка", "Проект уже запущен")
-                self.hide_progress()
-                return
-            else:
-                output_window.close()
-                output_window.deleteLater()
-
-        process = QProcess(self)
-        process.setProgram(python_executable)
-        process.setArguments([run_file])
-        process.setWorkingDirectory(project_path)
-
-        output_window = OutputWindow(project_name, process)
-        self.output_windows[project_name] = output_window
-        output_window.show()
-
-        process.readyReadStandardOutput.connect(
-            lambda: output_window.append_output(str(process.readAllStandardOutput(), 'utf-8')))
-        process.readyReadStandardError.connect(
-            lambda: output_window.append_output(str(process.readAllStandardError(), 'utf-8')))
-        process.finished.connect(lambda: output_window.set_status("Скрипт завершил работу"))
-
-        process.start()
-        self.hide_progress()
-
-    def open_settings(self):
-        self.settings = SettingsWindow(self)
-        self.settings.show()
-
-    def switch_commit(self):
-        current_item = self.projects_list.currentItem()
-        if not current_item:
-            QMessageBox.warning(self, "Ошибка", "Выберите проект для переключения коммита")
-            return
-
-        selected_commit = self.commit_selector.currentText().split(" - ")[0]
-        project_name = current_item.text()
-        project_path = os.path.join(self.projects_dir, project_name)
+        selected_commit = self.commit_tree.item(selected_item[0], "values")[0]
 
         try:
             repo = git.Repo(project_path)
 
             # Проверка на незакоммиченные изменения
             if repo.is_dirty():
-                QMessageBox.warning(self, "Ошибка",
-                                    "Есть несохраненные изменения. Сохраните изменения перед переключением коммитов.")
+                messagebox.showwarning("Ошибка",
+                                       "Есть несохраненные изменения. Сохраните изменения перед переключением коммитов.")
                 return
 
             # Проверка наличия выбранного коммита
             try:
-                commit = repo.commit(selected_commit)  # Проверка наличия коммита
+                repo.git.checkout(selected_commit)
+                messagebox.showinfo("Успех", f"Переключено на коммит {selected_commit}.")
             except git.exc.BadName:
-                QMessageBox.warning(self, "Ошибка", f"Коммит {selected_commit} не найден в репозитории.")
-                return
-
-            # Переключение на выбранный коммит
-            repo.git.checkout(selected_commit)
-
-            # Удаление старого виртуального окружения
-            venv_path = self.get_venv(project_path)
-            if os.path.exists(venv_path):
-                shutil.rmtree(venv_path)
-
-            # Создание нового виртуального окружения и установка зависимостей
-            subprocess.run(
-                [sys.executable, '-m', 'venv', venv_path],
-                check=True)
-            requirements_path = os.path.join(project_path, 'requirements.txt')
-            if os.path.exists(requirements_path):
-                subprocess.run([os.path.join(venv_path, 'Scripts', 'pip'), 'install', '-r', requirements_path],
-                               check=True)
-
-            # Обновление видимости коммитов после переключения
-            self.update_commits()
-
-            QMessageBox.information(self, "Успех", f"Переключено на коммит {selected_commit}")
-
+                messagebox.showerror("Ошибка", f"Коммит с SHA {selected_commit} не найден.")
         except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Ошибка при переключении коммита: {e}")
+            messagebox.showerror("Ошибка", f"Не удалось переключиться на коммит: {str(e)}")
 
-    def update_commits(self):
-        self.commit_selector.clear()
-        self.commit_selector.setVisible(False)
+    def show_commits_window(self):
+        selected_project = self.projects_listbox.get(self.projects_listbox.curselection())
+        project_path = os.path.join(self.projects_dir, selected_project)
 
-        selected_item = self.projects_list.currentItem()
-        if not selected_item:
-            return
+        # Создание нового окна
+        self.commits_window = Toplevel(self)
+        self.commits_window.title(f"Коммиты: {selected_project}")
+        self.commits_window.geometry("600x400")  # Размер окна
 
-        project_name = selected_item.text()
-        project_path = os.path.join(self.projects_dir, project_name)
+        # Настройка стиля
+        style = Style(self.commits_window)
+        style.configure("Treeview", rowheight=25, font=("Arial", 10))
+        style.configure("Treeview.Heading", font=("Arial", 12, "bold"))
+
+        # Заголовок
+        title_label = Label(self.commits_window, text=f"Коммиты проекта {selected_project}", font=("Arial", 14))
+        title_label.pack(pady=10)
+
+        # Рамка для таблицы коммитов
+        commits_frame = Frame(self.commits_window)
+        commits_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Scrollbar для таблицы
+        scrollbar = Scrollbar(commits_frame)
+        scrollbar.pack(side="right", fill="y")
+
+        # Таблица для отображения коммитов
+        self.commit_tree = Treeview(commits_frame, columns=("sha", "message"), show="headings", yscrollcommand=scrollbar.set)
+        self.commit_tree.pack(fill="both", expand=True)
+
+        scrollbar.config(command=self.commit_tree.yview)
+
+        # Определение столбцов
+        self.commit_tree.heading("sha", text="SHA")
+        self.commit_tree.heading("message", text="Сообщение")
+
+        self.commit_tree.column("sha", width=150)
+        self.commit_tree.column("message", width=400)
+
+        # Загрузка коммитов в таблицу
+        self.update_commits(project_path)
+
+        # Кнопка для переключения на выбранный коммит
+        switch_button = Button(self.commits_window, text="Переключиться на выбранный коммит",
+                               command=lambda: self.switch_commit(project_path))
+        switch_button.pack(pady=10)
+
+    def update_commits(self, project_path):
+        try:
+            repo = git.Repo(project_path)
+            commits = list(repo.iter_commits('master', max_count=100))
+            self.commit_tree.delete(*self.commit_tree.get_children())  # Очистка предыдущих данных
+
+            for commit in commits:
+                self.commit_tree.insert("", "end", values=(commit.hexsha[:7], commit.message))
+            if commits:
+                self.commit_tree.selection_set(self.commit_tree.get_children()[0])  # Выбор первого коммита
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить коммиты: {str(e)}")
+
+    def initUI(self):
+        self.title("GitHub Manager")
+
+        self.menubar = Menu(self)
+        self.config(menu=self.menubar)
+
+        fileMenu = Menu(self.menubar, tearoff=0)
+        fileMenu.add_command(label="Настройки", command=self.show_settings)
+        fileMenu.add_command(label="Выйти", command=self.on_close)
+        self.menubar.add_cascade(label="Файл", menu=fileMenu)
+
+        projectMenu = Menu(self.menubar, tearoff=0)
+        projectMenu.add_command(label="Скачать проект", command=self.clone_project)
+        self.menubar.add_cascade(label="Проекты", menu=projectMenu)
+
+        self.frame = Frame(self)
+        self.frame.pack(fill=BOTH, expand=True)
+
+        self.projects_listbox = Listbox(self.frame)
+        self.projects_listbox.pack(side="left", fill=BOTH, expand=True)
+
+        scrollbar = Scrollbar(self.frame)
+        scrollbar.pack(side="left", fill='y')
+        self.projects_listbox.config(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.projects_listbox.yview)
+
+        self.projects_listbox.bind('<<ListboxSelect>>', self.on_project_select)
+
+        self.details_frame = Frame(self.frame)
+        self.details_frame.pack(fill=BOTH, expand=True)
+
+        self.project_label = Label(self.details_frame, text="")
+        self.project_label.pack()
+
+        self.run_button = Button(self.details_frame, text="Запустить проект", command=self.run_project)
+        self.run_button.pack()
+
+        self.commits_button = Button(self.details_frame, text="Переключить коммит", command=self.show_commits_window)
+        self.commits_button.pack()
+
+        self.update_button = Button(self.details_frame, text="Обновить проект", command=self.update_project)
+        self.update_button.pack()
+
+        self.delete_button = Button(self.details_frame, text="Удалить проект", command=self.delete_project)
+        self.delete_button.pack()
+
+        self.progress_bar = Progressbar(self.details_frame, orient=HORIZONTAL, length=100, mode='determinate')
+        self.progress_bar.pack(fill=X, padx=10, pady=10)
+
+        self.progress_label = Label(self.details_frame, text="")
+        self.progress_label.pack()
+
+        self.load_projects()
+
+    def show_settings(self):
+        settings_window = SettingsWindow(self)
+        settings_window.grab_set()
+
+    def load_projects(self):
+        self.projects_listbox.delete(0, END)
+        if os.path.exists(self.projects_dir):
+            for project in os.listdir(self.projects_dir):
+                project_path = os.path.join(self.projects_dir, project)
+                if os.path.isdir(project_path) and os.path.exists(os.path.join(project_path, '.git')):
+                    self.projects_listbox.insert(END, project)
+
+    def on_project_select(self, event):
+        if self.projects_listbox.curselection():
+            selected_project = self.projects_listbox.get(self.projects_listbox.curselection())
+            self.project_label.config(text=f"Проект: {selected_project}")
+
+    def run_project(self):
+        selected_project = self.projects_listbox.get(self.projects_listbox.curselection())
+        project_path = os.path.join(self.projects_dir, selected_project)
+
         config_path = os.path.join(project_path, 'config.json')
 
         try:
-            repo = git.Repo(project_path)
-            # Получаем все коммиты
-            commits = list(repo.iter_commits('--all'))
-            commit_info = []
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            config = {}  # Инициализация переменной config
+            run_file = filedialog.askopenfilename(initialdir=project_path, title="Выберите файл для запуска")
+            if run_file:
+                config['run_file'] = run_file
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, ensure_ascii=False, indent=4)
+            else:
+                messagebox.showerror("Ошибка", "Файл для запуска не выбран.")
+                return
 
-            for commit in commits:
-                self.commit_selector.addItem(f"{commit.hexsha[:7]} - {commit.message.strip()[:50]}")
-                commit_info.append({"hash": commit.hexsha, "message": commit.message.strip()})
+        run_file = config['run_file']
 
-            # Сохраняем информацию о коммитах в config.json
-            with open(config_path, 'w') as f:
-                json.dump({"commits": commit_info}, f)
+        self.output_windows[selected_project] = OutputWindow(selected_project, None)
+        self.output_windows[selected_project].append_output(f"Запуск {run_file}...\n")
 
-            if commits:
-                self.commit_selector.setVisible(True)
+        venv_path = os.path.join(project_path, 'venv', 'Scripts', 'python.exe')
+        if not os.path.exists(venv_path):
+            venv_path = os.path.join(project_path, '.venv', 'Scripts', 'python.exe')
 
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить коммиты: {str(e)}")
+        if not os.path.exists(venv_path):
+            messagebox.showerror("Ошибка", "Виртуальное окружение не найдено.")
+            return
 
-    def get_venv(self, project_path):
-        venv_path = os.path.join(project_path, 'venv')
-        if os.path.exists(venv_path):
-            return venv_path
-        return os.path.join(project_path, '.venv')
+        process = subprocess.Popen([venv_path, run_file], cwd=project_path, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, encoding='utf-8')
+        self.output_windows[selected_project].process = process
+
+        def read_output():
+            for line in process.stdout:
+                self.output_windows[selected_project].append_output(line)
+            process.stdout.close()
+
+            for line in process.stderr:
+                self.output_windows[selected_project].append_output(line)
+            process.stderr.close()
+
+            process.wait()
+            self.output_windows[selected_project].set_status("Проект завершен")
+
+        threading.Thread(target=read_output).start()
+
+    def update_project(self):
+        selected_project = self.projects_listbox.get(self.projects_listbox.curselection())
+        project_path = os.path.join(self.projects_dir, selected_project)
+
+        def update_progress(value):
+            self.progress_bar['value'] = value
+
+        def update_message(message):
+            self.progress_label.config(text=message)
+
+        def update_finished():
+            messagebox.showinfo("Обновление", "Проект успешно обновлен")
+            self.progress_bar['value'] = 0
+            self.progress_label.config(text="")
+
+        update_thread = UpdateThread(project_path, update_progress, update_message, update_finished)
+        update_thread.start()
+
+    def update_project_by_path(self, project_path):
+        def update_progress(value):
+            self.progress_bar['value'] = value
+
+        def update_message(message):
+            self.progress_label.config(text=message)
+
+        def update_finished():
+            self.progress_bar['value'] = 0
+            self.progress_label.config(text="")
+
+        update_thread = UpdateThread(project_path, update_progress, update_message, update_finished)
+        update_thread.start()
+
+    def delete_project(self):
+        selected_project = self.projects_listbox.get(self.projects_listbox.curselection())
+        project_path = os.path.join(self.projects_dir, selected_project)
+
+        confirm = messagebox.askyesno("Удалить проект", f"Вы уверены, что хотите удалить проект {selected_project}?")
+        if confirm:
+            shutil.rmtree(project_path)
+            self.load_projects()
+
+    def clone_project(self):
+        url = simpledialog.askstring("Скачать проект", "Введите URL репозитория GitHub")
+        if url:
+            def update_progress(value):
+                self.progress_bar['value'] = value
+
+            def update_message(message):
+                self.progress_label.config(text=message)
+
+            def update_finished():
+                self.load_projects()
+                messagebox.showinfo("Скачивание", "Проект успешно скачан")
+                self.progress_bar['value'] = 0
+                self.progress_label.config(text="")
+
+            clone_thread = CloneThread(url, self.projects_dir, update_progress, update_message, update_finished)
+            clone_thread.start()
+
+    def autoupdate_projects(self):
+        for project in os.listdir(self.projects_dir):
+            project_path = os.path.join(self.projects_dir, project)
+            if os.path.isdir(project_path) and os.path.exists(os.path.join(project_path, '.git')):
+                self.update_project_by_path(project_path)
+        self.after(3600000, self.autoupdate_projects)  # Повторный вызов функции через 1 час
 
 
 if __name__ == "__main__":
-
-    app = QApplication(sys.argv)
-    window = GitHubManager()
-    window.show()
-    sys.exit(app.exec_())
+    app = GitHubManager()
+    app.mainloop()
