@@ -9,6 +9,7 @@ import git
 from tkinter import Tk, Frame, Label, Entry, Button, Listbox, Menu, filedialog, messagebox, simpledialog, Scrollbar, Text, Toplevel, END, BOTH, W, N, E, S, HORIZONTAL, X, OptionMenu, StringVar
 from tkinter.ttk import Progressbar, Style, Treeview
 
+import psutil
 from pynput import keyboard
 
 SETTINGS_FILE = 'settings.json'
@@ -102,14 +103,12 @@ class OutputWindow(Toplevel):
         self.status_label.config(text=status)
 
     def stop_process(self):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
+        if self.process.poll() is None:  # Проверяем, что процесс еще работает
+            self.process.terminate()  # Попробуйте завершить процесс
             try:
-                self.process.wait(timeout=3)
+                self.process.wait(timeout=5)  # Ждем завершения процесса
             except subprocess.TimeoutExpired:
                 self.process.kill()
-            self.set_status("Проект остановлен")
-            self.stop_button.config(state='disabled')
 
     def close(self):
         self.stop_process()
@@ -274,7 +273,26 @@ class GitHubManager(Tk):
         if self.output_windows:
             last_project = list(self.output_windows.keys())[-1]
             print(f"Stopping project: {last_project}")  # Проверка, что проект выбирается
-            self.output_windows[last_project].stop_process()
+            window = self.output_windows[last_project]
+
+            if window.process and window.process.poll() is None:
+                print(f"Terminating process for project: {last_project}")
+                parent_process = psutil.Process(window.process.pid)
+                for child in parent_process.children(recursive=True):  # Убиваем дочерние процессы
+                    child.kill()
+                parent_process.terminate()
+                try:
+                    parent_process.wait(timeout=3)  # Ждем завершения процесса
+                    print(f"Process for project {last_project} terminated")
+                except psutil.TimeoutExpired:
+                    print(f"Process for project {last_project} did not terminate, killing it")
+                    parent_process.kill()
+                    print(f"Process for project {last_project} killed")
+
+                window.set_status("Проект остановлен")
+                window.stop_button.config(state='disabled')
+            else:
+                print(f"No active process for project: {last_project}")
         else:
             print("No projects running")
 
