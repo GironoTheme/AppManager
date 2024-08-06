@@ -122,26 +122,29 @@ class SettingsWindow(Toplevel):
         self.parent = parent
         self.initUI()
 
+        self.minsize(300, 250)
+
     def initUI(self):
         self.title("Настройки")
-        self.geometry("400x200")
 
-        style = Style(self)
-        style.configure("TLabel", font=("Segoe UI", 12))
-        style.configure("TButton", font=("Segoe UI", 12))
-
-        path_label = Label(self, text="Путь папки проектов:")
-        path_label.pack(pady=10)
+        self.path_label = Label(self, text="Путь папки проектов:")
+        self.path_label.pack()
 
         self.path_input = Entry(self)
         self.path_input.insert(0, self.parent.projects_dir)
-        self.path_input.pack(padx=10, pady=5)
+        self.path_input.pack()
 
         self.path_browse_button = Button(self, text="Обзор...", command=self.browse_folder)
-        self.path_browse_button.pack(pady=5)
+        self.path_browse_button.pack()
+
+        self.run_files_label = Label(self, text="Сбросить пути файлов запуска:")
+        self.run_files_label.pack()
+
+        self.run_files_reset_button = Button(self, text="Сбросить", command=self.reset_run_paths)
+        self.run_files_reset_button.pack()
 
         self.save_button = Button(self, text="Сохранить", command=self.save_settings)
-        self.save_button.pack(pady=10)
+        self.save_button.pack()
 
     def browse_folder(self):
         folder = filedialog.askdirectory(initialdir=self.parent.projects_dir, title="Выберите папку проектов")
@@ -149,15 +152,26 @@ class SettingsWindow(Toplevel):
             self.path_input.delete(0, END)
             self.path_input.insert(0, folder)
 
+    def reset_run_paths(self):
+        for project in os.listdir(self.parent.projects_dir):
+            config_path = os.path.join(self.parent.projects_dir, project, 'config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                config['run_file'] = None
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, ensure_ascii=False, indent=4)
+        messagebox.showinfo("Сброс путей", "Пути файлов запуска сброшены")
+
     def save_settings(self):
         new_path = self.path_input.get()
         if new_path and new_path != self.parent.projects_dir:
             self.parent.projects_dir = new_path
             os.makedirs(self.parent.projects_dir, exist_ok=True)
             self.parent.load_projects()
-            settings = self.parent.load_settings()
+            settings = load_settings()
             settings['projects_dir'] = new_path
-            self.parent.save_settings(settings)
+            save_settings(settings)
         self.destroy()
 
     def close(self):
